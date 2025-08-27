@@ -14,6 +14,7 @@ import {
   verifyEmailAuthHelper,
   resetPasswordAuthHelper,
   forgotPasswordAuthHelper,
+  getUserProfileHelper,
 } from "./auth.helper";
 
 //login controller
@@ -65,7 +66,7 @@ export const loginAuthController = async (req: Request, res: Response) => {
     res.cookie("accessToken", session.access_token, {
       httpOnly: true,
       secure: true,
-      sameSite: "strict",
+      sameSite: "none",
       path: "/",
       maxAge: accessTokenMaxAge,
     });
@@ -73,7 +74,7 @@ export const loginAuthController = async (req: Request, res: Response) => {
     res.cookie("refreshToken", session.refresh_token, {
       httpOnly: true,
       secure: true,
-      sameSite: "strict",
+      sameSite: "none",
       path: "/",
       maxAge: refreshTokenMaxAge,
     });
@@ -268,5 +269,72 @@ export const forgotPasswordAuthController = async (
       message: "Internal server error",
       details: message,
     });
+  }
+};
+
+export const profileAuthController = async (req: Request, res: Response) => {
+  try {
+    const result = await getUserProfileHelper();
+    const { user, session } = result as { user: User; session: Session };
+
+    if (!user) {
+      console.warn("[Auth] No user returned from Supabase.");
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    if (!session?.access_token || !session?.refresh_token) {
+      return res.status(500).json({
+        status: "error",
+        message: "Token generation failed",
+      });
+    }
+
+    const { data: roleData, error: roleError } = await supabase
+      .from("iLocalUsers")
+      .select("id, role")
+      .eq("email", user.email)
+      .single();
+
+    if (roleError) throw roleError;
+
+    const accessTokenMaxAge = 15 * 60 * 1000; // 15 minutes or 1 days
+    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000; // 7 days or 30 days
+
+    res.cookie("accessToken", session.access_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      path: "/",
+      maxAge: accessTokenMaxAge,
+    });
+
+    res.cookie("refreshToken", session.refresh_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      path: "/",
+      maxAge: refreshTokenMaxAge,
+    });
+
+    const currentUser = {
+      id: roleData?.id,
+      email: user.email,
+      role: (roleData?.role ?? "USER") as IUserProfileRoleType,
+      created_at: user.created_at,
+      updated_at: user.updated_at,
+      isUserVerified: user.user_metadata?.isUserVerified ?? false,
+    };
+
+    return res.status(200).json({
+      status: "success",
+      message: "Profile fetch successful",
+      data: { currentUser },
+    });
+  } catch (error) {
+    const fallbackMessage =
+      (error as { message?: string })?.message || "Authentication failed.";
+    console.warn("[Auth Error]", fallbackMessage);
+
+    return res.status(401).json({ message: fallbackMessage });
   }
 };

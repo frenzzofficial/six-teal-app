@@ -13,5 +13,6 @@ authRoutes.post(
   "/forgot-password",
   authControllers.forgotPasswordAuthController
 );
+authRoutes.post("/profile", authControllers.profileAuthController);
 
 export default authRoutes;

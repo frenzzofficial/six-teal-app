@@ -1,5 +1,5 @@
-import { AuthResponse, UserResponse } from "@supabase/supabase-js";
 import { supabase } from "../../../libs/db/db.supabase";
+import { AuthResponse, User, UserResponse } from "@supabase/supabase-js";
 
 // Custom error type
 interface AuthError {
@@ -256,6 +256,39 @@ export const forgotPasswordAuthHelper = async (
     throw {
       message: fallback.message || "Unexpected error during password recovery.",
       status: fallback.status || 500,
+    };
+  }
+};
+
+export const getUserProfileHelper = async () => {
+  try {
+    const { data, error } = await supabase.auth.getUser();
+
+    if (error) {
+      console.error("[Supabase Auth Error]", error.message);
+      throw {
+        message: error.message || "Failed to verify access token.",
+        status: error.status || 401,
+      } satisfies AuthError;
+    }
+
+    if (!data?.user) {
+      console.error("[Supabase Auth] No user object returned.");
+      throw {
+        message:
+          "No user object returned. Something went wrong during verification.",
+        status: 500,
+      } satisfies AuthError;
+    }
+
+    console.log("[User Profile]", data.user);
+    return data;
+  } catch (err: unknown) {
+    const fallback = err as AuthError;
+    console.error("[User Verification Failed]", fallback.message);
+    throw {
+      message: fallback?.message || "Unexpected error during verification.",
+      status: fallback?.status || 500,
     };
   }
 };
