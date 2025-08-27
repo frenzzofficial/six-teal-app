@@ -276,18 +276,20 @@ export const profileAuthController = async (req: Request, res: Response) => {
   try {
     const result = await getUserProfileHelper();
     const { user, session } = result as { user: User; session: Session };
+    console.log(user);
+
 
     if (!user) {
       console.warn("[Auth] No user returned from Supabase.");
       return res.status(404).json({ message: "User not found." });
     }
 
-    if (!session?.access_token || !session?.refresh_token) {
-      return res.status(500).json({
-        status: "error",
-        message: "Token generation failed",
-      });
-    }
+    // if (!session?.access_token || !session?.refresh_token) {
+    //   return res.status(500).json({
+    //     status: "error",
+    //     message: "Token generation failed",
+    //   });
+    // }
 
     const { data: roleData, error: roleError } = await supabase
       .from("iLocalUsers")
