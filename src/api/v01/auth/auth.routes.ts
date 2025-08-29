@@ -14,5 +14,6 @@ authRoutes.post(
   authControllers.forgotPasswordAuthController
 );
 authRoutes.post("/profile", authControllers.profileAuthController);
+authRoutes.post("/refresh", authControllers.refreshTokenAuthController);
 
 export default authRoutes;

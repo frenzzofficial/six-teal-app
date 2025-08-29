@@ -1,10 +1,10 @@
-import z from "zod";
 import { Request, Response } from "express";
 import { Session, User } from "@supabase/supabase-js";
 
 import { errorHandler } from "./auth.error";
 import { supabase } from "../../../libs/db/db.supabase";
 import { IUserProfileRoleType } from "../../../types/users";
+import { envBackendConfig } from "../../../libs/env/env.backend";
 import { loginSchema, registrationSchema } from "./auth.schemas";
 
 import {
@@ -14,34 +14,49 @@ import {
   verifyEmailAuthHelper,
   resetPasswordAuthHelper,
   forgotPasswordAuthHelper,
-  getUserProfileHelper,
+  getUserProfile,
 } from "./auth.helper";
+
+const isProd = process.env.NODE_ENV === "production";
+
+// Extract domain name only (no protocol, no port)
+const rawDomain = isProd
+  ? envBackendConfig.APP_BACKEND.replace(/^https?:\/\//, "").split(":")[0]
+  : "localhost"; // For local dev, cookies won't be shared cross-site anyway
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: true,
+  sameSite: "none" as const, // 🔥 Required for cross-site cookie sharing
+  path: "/",
+  domain: isProd ? rawDomain : undefined, // Don't set domain in dev
+};
 
 //login controller
 export const loginAuthController = async (req: Request, res: Response) => {
   try {
     const parsed = loginSchema.safeParse(req.body);
-
     if (!parsed.success) {
       if (process.env.NODE_ENV === "development") {
-        console.error("[Validation Error]", parsed.error.issues); // Avoid .format()
+        console.error("[Validation Error]", parsed.error.issues);
       }
 
       return res.status(400).json({
         status: "failed",
         message: "Invalid input",
-        errors: parsed.error.issues.map((issue) => ({
-          path: issue.path.join("."),
-          message: issue.message,
-          code: issue.code,
+        errors: parsed.error.issues.map(({ path, message, code }) => ({
+          path: path.join("."),
+          message,
+          code,
         })),
       });
     }
 
     const { email, password, remember } = parsed.data;
-
-    const result = await loginAuthHelper(email, password);
-    const { user, session } = result as { user: User; session: Session };
+    const { user, session } = (await loginAuthHelper(email, password)) as {
+      user: User;
+      session: Session;
+    };
 
     if (!session?.access_token || !session?.refresh_token) {
       return res.status(500).json({
@@ -50,39 +65,27 @@ export const loginAuthController = async (req: Request, res: Response) => {
       });
     }
 
-    const { data: roleData, error: roleError } = await supabase
-      .from("iLocalUsers")
-      .select("id, role")
-      .eq("email", email)
-      .single();
+    const userDatafromDB = await getUserProfile(email);
 
-    if (roleError) throw roleError;
+    const accessTokenMaxAge = remember ? 86400000 : 900000; // 1 day or 15 min
+    const refreshTokenMaxAge = remember ? 2592000000 : 604800000; // 30 or 7 days
 
-    const accessTokenMaxAge = remember ? 24 * 60 * 60 * 1000 : 15 * 60 * 1000; // 15 minutes or 1 days
-    const refreshTokenMaxAge = remember
-      ? 30 * 24 * 60 * 60 * 1000
-      : 7 * 24 * 60 * 60 * 1000; // 7 days or 30 days
-
-    res.cookie("accessToken", session.access_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      path: "/",
+    res.cookie("accesstoken", session.access_token, {
+      ...cookieOptions,
       maxAge: accessTokenMaxAge,
     });
 
-    res.cookie("refreshToken", session.refresh_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      path: "/",
+    res.cookie("refreshtoken", session.refresh_token, {
+      ...cookieOptions,
       maxAge: refreshTokenMaxAge,
     });
 
     const currentUser = {
-      id: roleData?.id,
+      id: userDatafromDB?.id,
       email,
-      role: (roleData?.role ?? "USER") as IUserProfileRoleType,
+      role: (userDatafromDB?.role ?? "USER") as IUserProfileRoleType,
+      fullname: userDatafromDB?.fullname ?? "",
+      avatar: userDatafromDB?.avatar ?? null,
       created_at: user.created_at,
       updated_at: user.updated_at,
       isUserVerified: user.user_metadata?.isUserVerified ?? false,
@@ -91,11 +94,102 @@ export const loginAuthController = async (req: Request, res: Response) => {
     return res.status(200).json({
       status: "success",
       message: "Login successful",
-      data: { currentUser },
+      data: currentUser,
     });
-  } catch (error: unknown) {
+  } catch (error) {
     errorHandler(error, req, res);
   }
+};
+
+export const profileAuthController = async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies.accesstoken as string;
+    if (!token) {
+      return res.status(401).json({ status: "error", message: "Unauthorized" });
+    }
+
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res
+        .status(401)
+        .json({ status: "error", message: "Invalid token" });
+    }
+    if (!user.email) {
+      return res
+        .status(401)
+        .json({ status: "error", message: "Invalid user email" });
+    }
+
+    const userDatafromDB = await getUserProfile(user.email);
+
+    const currentUser = {
+      id: userDatafromDB?.id,
+      email: user.email,
+      role: (userDatafromDB?.role ?? "USER") as IUserProfileRoleType,
+      fullname: userDatafromDB?.fullname ?? "",
+      avatar: userDatafromDB?.avatar ?? null,
+      created_at: user.created_at,
+      updated_at: user.updated_at,
+      isUserVerified: user.user_metadata?.isUserVerified ?? false,
+    };
+
+    return res.status(200).json({
+      status: "success",
+      message: "User profile fetched successfully",
+      data: currentUser,
+    });
+  } catch (error) {
+    errorHandler(error, req, res);
+  }
+};
+
+export const refreshTokenAuthController = async (
+  req: Request,
+  res: Response
+) => {
+  const token = req.cookies.refreshtoken as string;
+  const { remember } = req.body as { remember: boolean };
+
+  if (!token) {
+    return res
+      .status(401)
+      .json({ status: "error", message: "Unauthorized: No refresh token" });
+  }
+
+  // Attempt to refresh session using the refresh token
+  const { data, error } = await supabase.auth.refreshSession({
+    refresh_token: token,
+  });
+
+  if (error || !data.session) {
+    return res
+      .status(401)
+      .json({ status: "error", message: "Invalid or expired refresh token" });
+  }
+
+  const { access_token, refresh_token } = data.session;
+
+  const accessTokenMaxAge = remember ? 86400000 : 900000; // 1 day or 15 min
+  const refreshTokenMaxAge = remember ? 2592000000 : 604800000; // 30 or 7 days
+
+  // Set new cookies
+  res.cookie("accesstoken", access_token, {
+    ...cookieOptions,
+    maxAge: accessTokenMaxAge,
+  });
+
+  res.cookie("refreshtoken", refresh_token, {
+    ...cookieOptions,
+    maxAge: refreshTokenMaxAge,
+  });
+
+  return res
+    .status(200)
+    .json({ status: "success", message: "Session refreshed" });
 };
 
 //logout controller
@@ -269,74 +363,5 @@ export const forgotPasswordAuthController = async (
       message: "Internal server error",
       details: message,
     });
-  }
-};
-
-export const profileAuthController = async (req: Request, res: Response) => {
-  try {
-    const result = await getUserProfileHelper();
-    const { user, session } = result as { user: User; session: Session };
-    console.log(user);
-
-
-    if (!user) {
-      console.warn("[Auth] No user returned from Supabase.");
-      return res.status(404).json({ message: "User not found." });
-    }
-
-    // if (!session?.access_token || !session?.refresh_token) {
-    //   return res.status(500).json({
-    //     status: "error",
-    //     message: "Token generation failed",
-    //   });
-    // }
-
-    const { data: roleData, error: roleError } = await supabase
-      .from("iLocalUsers")
-      .select("id, role")
-      .eq("email", user.email)
-      .single();
-
-    if (roleError) throw roleError;
-
-    const accessTokenMaxAge = 15 * 60 * 1000; // 15 minutes or 1 days
-    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000; // 7 days or 30 days
-
-    res.cookie("accessToken", session.access_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      path: "/",
-      maxAge: accessTokenMaxAge,
-    });
-
-    res.cookie("refreshToken", session.refresh_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      path: "/",
-      maxAge: refreshTokenMaxAge,
-    });
-
-    const currentUser = {
-      id: roleData?.id,
-      email: user.email,
-      role: (roleData?.role ?? "USER") as IUserProfileRoleType,
-      created_at: user.created_at,
-      updated_at: user.updated_at,
-      isUserVerified: user.user_metadata?.isUserVerified ?? false,
-    };
-
-    return res.status(200).json({
-      status: "success",
-      message: "Profile fetch successful",
-      data: { currentUser },
-    });
-  } catch (error) {
-    const fallbackMessage =
-      (error as { message?: string })?.message || "Authentication failed.";
-    console.warn("[Auth Error]", fallbackMessage);
-
-    return res.status(401).json({ message: fallbackMessage });
   }
 };
